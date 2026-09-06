@@ -2,6 +2,7 @@ import time
 import MetaTrader5 as mt5
 import json
 import gc
+import atexit
 from google import genai
 from google.genai import types
 
@@ -9,6 +10,9 @@ import config
 from tools import trading_tools, review_past_performance, check_spread_safe, get_market_data, execute_trade, send_telegram_alert, calculate_dynamic_lot_size, log_trade, get_current_atr, get_current_spread, get_higher_timeframe_trend
 from diagnostics import run_startup_test
 import strategies
+
+# Register shutdown alert
+atexit.register(lambda: send_telegram_alert("🛑 Trading Bot Stopped."))
 
 
 SYSTEM_INSTRUCTIONS = """
@@ -22,35 +26,70 @@ RULE 3: If RSI is between 45 and 55, the market is chopping sideways. Output 'HO
 """
 
 
-def ask_gatekeeper_with_retry(prompt: str, chat_session, max_retries: int = 4) -> str:
-    """
-    Sends a prompt to Gemini with exponential backoff for 503 errors.
-    If the API remains down, it defaults to REJECT to protect the account.
-    """
-    delay = 1 # Start with a 1-second delay
+def clean_and_parse_json(raw_text: str) -> dict:
+    """Strips markdown code blocks and normalizes JSON keys to lowercase."""
+    text = raw_text.strip()
+    
+    # 1. Remove markdown backticks if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Strip top backticks line (e.g., ```json)
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        # Strip bottom backticks line
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+        
+    # 2. Parse JSON
+    parsed = json.loads(text)
+    
+    # 3. Normalize keys to lowercase (handles DECISION vs decision)
+    normalized = {str(k).lower(): v for k, v in parsed.items()}
+    
+    return {
+        "decision": str(normalized.get("decision", "REJECT")).upper(),
+        "reasoning": str(normalized.get("reasoning", "No reasoning provided."))
+    }
+
+def ask_gatekeeper_with_retry(client, prompt: str, max_retries: int = 4) -> dict:
+    """Sends prompt to Gemini, with robust JSON cleaning and 503 retry logic."""
+    delay = 1
     
     for attempt in range(max_retries):
         try:
-            # Attempt to send the message
-            response = chat_session.send_message(prompt)
-            return response.text.strip().upper()
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            
+            # Clean markdown and parse json safely
+            return clean_and_parse_json(response.text)
             
         except Exception as e:
             error_msg = str(e)
-            
-            # Check if the error is a 503 or High Demand issue
-            if "503" in error_msg or "UNAVAILABLE" in error_msg:
-                print(f"⚠️ API Overloaded (503). Retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+            if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg:
+                print(f"⚠️ API Overloaded (503/429). Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
-                delay *= 2 # Exponential backoff: waits 1s, then 2s, then 4s, then 8s
+                delay *= 2
             else:
-                # If it is a different error (like an invalid API key), print it and break
-                print(f"❌ Unhandled API Error: {error_msg}")
+                print(f"⚠️ JSON Parsing or API Error: {error_msg}")
+                # Try cleaning response text if it exists
+                if 'response' in locals() and hasattr(response, 'text'):
+                    try:
+                        return clean_and_parse_json(response.text)
+                    except Exception:
+                        pass
                 break
                 
-    # If the loop exhausts all retries, fail safely.
-    print("🚨 Gatekeeper API completely offline. Defaulting to REJECT to protect capital.")
-    return "REJECT"
+    return {
+        "decision": "REJECT", 
+        "reasoning": "Gatekeeper formatting or API error. Defaulting to REJECT to protect capital."
+    }
 
 def run_trading_bot():
     """Main autonomous trading loop powered by Gemini."""
@@ -59,21 +98,31 @@ def run_trading_bot():
     
     client = genai.Client()
 
-    chat = client.chats.create(
-        model=config.MODEL_NAME,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTIONS,
-            tools=trading_tools,
-            temperature=config.TEMPERATURE,
-        ),
-    )
-
+    # (chat object no longer used by ask_gatekeeper_with_retry)
+    
     print(f"\n[AI AGENT ACTIVE] Model: {config.MODEL_NAME} | Symbol: {config.DEFAULT_SYMBOL}")
     print(f"Risk Rules: SL=2.0x ATR, TP=4.0x ATR, Daily Loss Limit=${config.MAX_DAILY_LOSS}")
     print(f"Checking market every {config.LOOP_INTERVAL_SECONDS} seconds...\n")
 
+    # Initialize heartbeat timer
+    last_heartbeat_time = time.time()
+    HEARTBEAT_INTERVAL = 3600 # 1 hour
+
     while True:
         try:
+            # --- HEARTBEAT CHECK ---
+            current_time = time.time()
+            if current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL:
+                terminal_info = mt5.terminal_info()
+                account_info = mt5.account_info()
+                send_telegram_alert(
+                    f"🟢 <b>[SYSTEM HEARTBEAT]</b>\n\n"
+                    f"<b>Status:</b> Active\n"
+                    f"<b>MT5 Connected:</b> {terminal_info.connected}\n"
+                    f"<b>Account Equity:</b> ${account_info.equity:.2f}"
+                )
+                last_heartbeat_time = current_time
+
             # 0. Check for existing open positions (Machine-gun trading prevention)
             open_positions = mt5.positions_get(symbol="BTCUSD")
             if open_positions is not None and len(open_positions) > 0:
@@ -133,18 +182,10 @@ def run_trading_bot():
                     """
                     
                     # Pass signal through Gatekeeper using retry logic
-                    raw_response = ask_gatekeeper_with_retry(prompt, chat)
+                    decision_data = ask_gatekeeper_with_retry(client, prompt)
                     
-                    try:
-                        # Extract JSON from response (handling potential markdown formatting)
-                        json_str = raw_response.replace('```json', '').replace('```', '').strip()
-                        decision_data = json.loads(json_str)
-                        ai_decision = decision_data.get('decision', 'REJECT').upper()
-                        ai_reasoning = decision_data.get('reasoning', 'No reasoning provided.')
-                    except:
-                        print(f"Failed to parse JSON response: {raw_response}")
-                        ai_decision = 'REJECT'
-                        ai_reasoning = 'Failed to parse AI decision.'
+                    ai_decision = decision_data.get('decision', 'REJECT').upper()
+                    ai_reasoning = decision_data.get('reasoning', 'No reasoning provided.')
                     
                     print(f"AI Gatekeeper Decision: {ai_decision} | Reasoning: {ai_reasoning}")
                     

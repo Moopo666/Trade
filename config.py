@@ -21,15 +21,15 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Model Configuration
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-2.0-flash"
 TEMPERATURE = 0.1
 
 # Trading Parameters
-DEFAULT_SYMBOL = "BTCUSD"
+DEFAULT_SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M5
 DEFAULT_LOT_SIZE = 0.01
-DEFAULT_SL_POINTS = 200
-DEFAULT_TP_POINTS = 400
+DEFAULT_SL_POINTS = 500
+DEFAULT_TP_POINTS = 1000
 
 # Magic Numbers
 BOT_MAGIC_NUMBER = 777777
@@ -37,7 +37,7 @@ TEST_MAGIC_NUMBER = 888888
 
 # Risk Management
 MAX_DAILY_LOSS = -50.00  # Circuit breaker threshold
-MAX_ALLOWED_SPREAD_POINTS = 2500  # Max spread in points
+MAX_ALLOWED_SPREAD_POINTS = 150  # Max spread in points for Gold (e.g., 150 points = $1.50)
 
 # Autonomous Loop Interval
 LOOP_INTERVAL_SECONDS = 300  # 5 minutes (M5 timeframe)
