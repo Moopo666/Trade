@@ -21,7 +21,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Model Configuration
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-3.8-flash"
 TEMPERATURE = 0.1
 
 # Trading Parameters

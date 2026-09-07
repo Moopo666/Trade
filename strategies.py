@@ -1,8 +1,9 @@
 import pandas as pd
 import MetaTrader5 as mt5
+import config
 
 # --- EA 1: RSI Mean Reversion ---
-def ea_rsi_reversion(symbol: str = "BTCUSD") -> dict:
+def ea_rsi_reversion(symbol: str = config.DEFAULT_SYMBOL) -> dict:
     """Strategy 100001: Buys when RSI < 30, Sells when RSI > 70."""
     rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
     if rates is None: return None
@@ -26,7 +27,7 @@ def ea_rsi_reversion(symbol: str = "BTCUSD") -> dict:
     return None # No signal
 
 # --- EA 2: EMA Trend Crossover ---
-def ea_ema_crossover(symbol: str = "BTCUSD") -> dict:
+def ea_ema_crossover(symbol: str = config.DEFAULT_SYMBOL) -> dict:
     """Strategy 100002: Buys when EMA 9 crosses above EMA 21."""
     rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
     if rates is None: return None

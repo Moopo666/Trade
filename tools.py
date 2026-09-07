@@ -2,14 +2,129 @@ import requests
 import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timedelta
+import time
 import config
 import csv
+import sqlite3
 
-# Technical analysis indicator library (TA-Lib or pure pandas fallback)
 try:
     import talib
 except ImportError:
     talib = None
+
+def get_unified_market_data(symbol: str) -> dict:
+    """Fetches M1 and M5 data and calculates indicators on closed bars (1 and 2)."""
+    # M1 Data
+    rates_m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 1, 20)
+    # M5 Data
+    rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 60)
+    
+    if rates_m1 is None or rates_m5 is None: return None
+
+    # RSI on M1
+    df_m1 = pd.DataFrame(rates_m1)
+    df_m1["close"] = df_m1["close"].astype(float)
+    delta_m1 = df_m1["close"].diff()
+    gain_m1 = (delta_m1.where(delta_m1 > 0, 0.0)).rolling(14).mean()
+    loss_m1 = (-delta_m1.where(delta_m1 < 0, 0.0)).rolling(14).mean()
+    rs_m1 = gain_m1 / loss_m1.replace(0, 1e-9)
+    rsi_m1 = (100 - (100 / (1 + rs_m1)))
+    
+    # EMA/ATR on M5
+    df_m5 = pd.DataFrame(rates_m5)
+    df_m5["close"] = df_m5["close"].astype(float)
+    df_m5["high"] = df_m5["high"].astype(float)
+    df_m5["low"] = df_m5["low"].astype(float)
+    
+    ema_m5 = df_m5["close"].ewm(span=50, adjust=False).mean()
+    
+    tr = pd.concat([
+        df_m5["high"] - df_m5["low"],
+        (df_m5["high"] - df_m5["close"].shift()).abs(),
+        (df_m5["low"] - df_m5["close"].shift()).abs()
+    ], axis=1).max(axis=1)
+    atr_m5 = tr.rolling(14).mean()
+
+    return {
+        "prev_m1_rsi": rsi_m1.iloc[-2],
+        "curr_m1_rsi": rsi_m1.iloc[-1],
+        "m5_ema50": ema_m5.iloc[-1],
+        "m5_atr": atr_m5.iloc[-1],
+        "m5_close": df_m5["close"].iloc[-1]
+    }
+
+def manage_existing_positions(position, m5_atr):
+    """Manages active position for Break-Even and Partial Close."""
+    symbol_info = mt5.symbol_info(position.symbol)
+    point = symbol_info.point
+    
+    # Calculate profit in points
+    price_diff = (mt5.symbol_info_tick(position.symbol).bid - position.price_open) if position.type == mt5.ORDER_TYPE_BUY else (position.price_open - mt5.symbol_info_tick(position.symbol).ask)
+    profit_points = price_diff / point
+    
+    # Break-Even: Profit >= 1.5 * ATR
+    if profit_points >= (m5_atr * 1.5) and position.sl < position.price_open:
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": position.ticket,
+            "sl": position.price_open,
+            "tp": position.tp,
+            "symbol": position.symbol
+        }
+        mt5.order_send(request)
+        send_telegram_alert(f"✅ Break-even set for ticket {position.ticket}")
+
+    # Partial Close: Profit >= 3.0 * ATR
+    if profit_points >= (m5_atr * 3.0) and position.comment != "Partial Closed":
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": position.ticket,
+            "symbol": position.symbol,
+            "volume": position.volume / 2.0,
+            "type": mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+            "price": mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask,
+            "deviation": 5,
+            "magic": position.magic,
+            "comment": "Partial Closed"
+        }
+        mt5.order_send(request)
+        send_telegram_alert(f"✅ Partial Close executed for ticket {position.ticket}")
+
+# Initialize Database
+def init_db():
+    """Initializes SQLite database for trade logging."""
+    conn = sqlite3.connect('trades.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trade_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME,
+            strategy TEXT,
+            direction TEXT,
+            spread REAL,
+            atr REAL,
+            trend TEXT,
+            decision TEXT,
+            reasoning TEXT,
+            actual_price_1h_later REAL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Ensure DB is initialized
+init_db()
+
+def log_trade_decision(strategy, direction, spread, atr, trend, decision, reasoning):
+    """Logs trade signals and AI decisions to SQLite."""
+    conn = sqlite3.connect('trades.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO trade_logs (timestamp, strategy, direction, spread, atr, trend, decision, reasoning)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (datetime.now(), strategy, direction, spread, atr, trend, decision, reasoning))
+    conn.commit()
+    conn.close()
 
 def send_telegram_alert(
     message: str,
@@ -32,13 +147,16 @@ def send_telegram_alert(
                 return
             else:
                 print(f"[DEBUG] Telegram Alert failed with status {response.status_code}: {response.text}")
-                return # If 400/401/403, retrying won't help without config changes
+                return 
         except Exception as e:
             print(f"Failed to send alert (attempt {attempt+1}/3): {e}")
             time.sleep(2) # Brief pause before retry
+            
+    # If we reach here, all retries failed
+    print(f"🚨 [CRITICAL] Telegram Alert Failed after 3 attempts: {message}")
 
 def calculate_dynamic_lot_size(symbol: str, sl_points: int, risk_percent: float = 0.01) -> float:
-    """Calculates lot size based on 1% risk of free margin."""
+    """Calculates lot size based on 1% risk of free margin using tick values."""
     account_info = mt5.account_info()
     if account_info is None: return 0.01
     
@@ -46,8 +164,22 @@ def calculate_dynamic_lot_size(symbol: str, sl_points: int, risk_percent: float 
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None: return 0.01
     
-    lot_size = round(risk_amount / (sl_points * symbol_info.point * 10000), 2)
-    return max(symbol_info.min_lot, min(lot_size, symbol_info.max_lot))
+    # Calculate stop loss distance in terms of price
+    sl_price_distance = sl_points * symbol_info.point
+    
+    # Calculate number of ticks in the stop loss distance
+    # Ensure tick_size is not zero to avoid division by zero
+    tick_size = symbol_info.trade_tick_size if symbol_info.trade_tick_size != 0 else 0.01
+    ticks = sl_price_distance / tick_size
+    
+    # Calculate risk per lot (assuming 1 lot)
+    # tick_value is profit for 1 tick per 1 lot
+    risk_per_lot = ticks * symbol_info.trade_tick_value
+    
+    if risk_per_lot == 0: return 0.01
+    
+    lot_size = round(risk_amount / risk_per_lot, 2)
+    return max(symbol_info.volume_min, min(lot_size, symbol_info.volume_max))
 
 def log_trade(ea_name, action, ai_reasoning, sl_points, ticket_id):
     """Logs trade details to a CSV file for strategy analysis."""
@@ -289,10 +421,86 @@ def get_higher_timeframe_trend(symbol: str = config.DEFAULT_SYMBOL) -> str:
     current_price = df["close"].iloc[-1]
     return f"BULLISH (Price {current_price:.2f} above H1 EMA 200)" if current_price > ema_200 else f"BEARISH (Price {current_price:.2f} below H1 EMA 200)"
 
+def is_market_open(symbol: str) -> bool:
+    """Checks if broker allows trading AND if current time is within allowed hours."""
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None or symbol_info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+        return False
+        
+    # Get Broker Server Time
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return False
+        
+    dt_server = datetime.fromtimestamp(tick.time)
+    
+    # 1. Weekend Check (0 = Monday, 6 = Sunday)
+    # Market usually closes late Friday and opens early Monday
+    if dt_server.weekday() >= 5:
+        return False
+        
+    # 2. Daily Time Check (Adjust hours as needed for your specific broker)
+    # Current example: Disables trading between 23:00 and 00:00 server time if needed.
+    # To keep 24h trading during weekdays, you can comment this block out.
+    current_hour = dt_server.hour
+    # Example: If your broker has a daily maintenance close at 23:00
+    if current_hour >= 23 or current_hour < 0:
+        return False
+        
+    return True
+
+def update_historical_outcomes(db_path="trades.db"):
+    """
+    Scans the database for trades older than 1 hour missing an outcome,
+    fetches the exact MT5 price from that future timestamp, and updates the row.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # 1. Find records older than 1 hour where the future price is still NULL
+        # Note: SQLite stores datetime as strings or integers. Assuming timestamp column is stored as string 'YYYY-MM-DD HH:MM:SS.mmmmmm'
+        # We need to find logs where timestamp is < (now - 1 hour)
+        one_hour_ago = datetime.now() - timedelta(hours=1)
+        
+        cursor.execute("""
+            SELECT id, timestamp 
+            FROM trade_logs 
+            WHERE timestamp < ? AND actual_price_1h_later IS NULL
+        """, (one_hour_ago,))
+        
+        pending_records = cursor.fetchall()
+        
+        # 2. Fetch the historical price and update the database
+        for record_id, timestamp_str in pending_records:
+            # Parse timestamp string to datetime object
+            timestamp_dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+            target_time = timestamp_dt + timedelta(hours=1)
+            
+            # Fetch the specific 1-minute candle at the target time
+            rates = mt5.copy_rates_from(config.DEFAULT_SYMBOL, mt5.TIMEFRAME_M1, target_time, 1)
+            
+            if rates is not None and len(rates) > 0:
+                future_close_price = rates[0]['close']
+                cursor.execute("""
+                    UPDATE trade_logs 
+                    SET actual_price_1h_later = ? 
+                    WHERE id = ?
+                """, (future_close_price, record_id))
+                
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        print(f"Error updating historical outcomes: {e}")
+
 trading_tools = [
     get_market_data,
     execute_trade,
     review_past_performance,
     get_higher_timeframe_trend,
     weekly_strategy_critic,
+    is_market_open,
+    log_trade_decision,
+    update_historical_outcomes,
 ]
