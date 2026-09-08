@@ -6,17 +6,11 @@ import time
 import config
 import csv
 import sqlite3
-
-try:
-    import talib
-except ImportError:
-    talib = None
+import indicators
 
 def get_unified_market_data(symbol: str) -> dict:
-    """Fetches M1 and M5 data and calculates indicators on closed bars (1 and 2)."""
-    # M1 Data
+    """Fetches M1 and M5 data and calculates indicators using indicators module."""
     rates_m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 1, 20)
-    # M5 Data
     rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 60)
     
     if rates_m1 is None or rates_m5 is None: return None
@@ -24,11 +18,7 @@ def get_unified_market_data(symbol: str) -> dict:
     # RSI on M1
     df_m1 = pd.DataFrame(rates_m1)
     df_m1["close"] = df_m1["close"].astype(float)
-    delta_m1 = df_m1["close"].diff()
-    gain_m1 = (delta_m1.where(delta_m1 > 0, 0.0)).rolling(14).mean()
-    loss_m1 = (-delta_m1.where(delta_m1 < 0, 0.0)).rolling(14).mean()
-    rs_m1 = gain_m1 / loss_m1.replace(0, 1e-9)
-    rsi_m1 = (100 - (100 / (1 + rs_m1)))
+    rsi_m1 = indicators.calculate_rsi(df_m1["close"])
     
     # EMA/ATR on M5
     df_m5 = pd.DataFrame(rates_m5)
@@ -36,14 +26,8 @@ def get_unified_market_data(symbol: str) -> dict:
     df_m5["high"] = df_m5["high"].astype(float)
     df_m5["low"] = df_m5["low"].astype(float)
     
-    ema_m5 = df_m5["close"].ewm(span=50, adjust=False).mean()
-    
-    tr = pd.concat([
-        df_m5["high"] - df_m5["low"],
-        (df_m5["high"] - df_m5["close"].shift()).abs(),
-        (df_m5["low"] - df_m5["close"].shift()).abs()
-    ], axis=1).max(axis=1)
-    atr_m5 = tr.rolling(14).mean()
+    ema_m5 = indicators.calculate_ema(df_m5["close"], 50)
+    atr_m5 = indicators.calculate_atr(df_m5, 14)
 
     return {
         "prev_m1_rsi": rsi_m1.iloc[-2],
@@ -52,6 +36,7 @@ def get_unified_market_data(symbol: str) -> dict:
         "m5_atr": atr_m5.iloc[-1],
         "m5_close": df_m5["close"].iloc[-1]
     }
+
 
 def manage_existing_positions(position, m5_atr):
     """Manages active position for Break-Even and Partial Close."""
