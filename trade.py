@@ -115,6 +115,9 @@ def run_trading_bot():
     print(f"Risk Rules: SL=2.0x ATR, TP=4.0x ATR, Daily Loss Limit=${config.MAX_DAILY_LOSS}")
     print(f"Checking market every {config.LOOP_INTERVAL_SECONDS} seconds...\n")
 
+    # Initialize heartbeat timer
+    last_heartbeat_time = datetime.datetime.now()
+
     # Initialize Telemetry
     telemetry = TelemetryManager()
 
@@ -140,10 +143,11 @@ def run_trading_bot():
 
             # --- HEARTBEAT CHECK ---
             current_time = datetime.datetime.now()
-            if current_time.hour != telemetry.last_heartbeat_hour:
+            if current_time - last_heartbeat_time >= datetime.timedelta(hours=1):
                 account_info = mt5.account_info()
                 equity = account_info.equity if account_info else 0.0
                 telemetry.send_hourly_report(current_time, equity, market_data.get('spread', 'N/A'))
+                last_heartbeat_time = current_time
 
             if active_pos:
                 # Handle existing positions (Manage BE/Partial Close)
