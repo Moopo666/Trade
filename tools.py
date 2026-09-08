@@ -41,10 +41,15 @@ def get_unified_market_data(symbol: str) -> dict:
 def manage_existing_positions(position, m5_atr):
     """Manages active position for Break-Even and Partial Close."""
     symbol_info = mt5.symbol_info(position.symbol)
+    if symbol_info is None: return 
+    
+    tick = mt5.symbol_info_tick(position.symbol)
+    if tick is None: return 
+    
     point = symbol_info.point
     
     # Calculate profit in points
-    price_diff = (mt5.symbol_info_tick(position.symbol).bid - position.price_open) if position.type == mt5.ORDER_TYPE_BUY else (position.price_open - mt5.symbol_info_tick(position.symbol).ask)
+    price_diff = (tick.bid - position.price_open) if position.type == mt5.ORDER_TYPE_BUY else (position.price_open - tick.ask)
     profit_points = price_diff / point
     
     # Break-Even: Profit >= 1.5 * ATR
@@ -67,7 +72,7 @@ def manage_existing_positions(position, m5_atr):
             "symbol": position.symbol,
             "volume": position.volume / 2.0,
             "type": mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY,
-            "price": mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask,
+            "price": tick.bid if position.type == mt5.ORDER_TYPE_BUY else tick.ask,
             "deviation": 5,
             "magic": position.magic,
             "comment": "Partial Closed"
@@ -202,11 +207,15 @@ def get_current_atr(symbol: str = config.DEFAULT_SYMBOL, period: int = 14) -> fl
         return float(tr.rolling(period).mean().iloc[-1])
 
 def get_current_spread(symbol: str = config.DEFAULT_SYMBOL) -> int:
-    """Returns the current spread in points."""
+    """Returns the current real-time spread in points."""
+    tick = mt5.symbol_info_tick(symbol)
     symbol_info = mt5.symbol_info(symbol)
-    if symbol_info is None:
-        return 0
-    return symbol_info.spread
+    
+    if tick is None or symbol_info is None or symbol_info.point == 0:
+        return 9999 # Return a high number to effectively disable trading if data is missing
+
+    # Spread in points = (ask - bid) / point
+    return int((tick.ask - tick.bid) / symbol_info.point)
 
 def check_spread_safe(
     symbol: str = config.DEFAULT_SYMBOL,
