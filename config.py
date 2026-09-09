@@ -40,4 +40,4 @@ MAX_DAILY_LOSS = -50.00  # Circuit breaker threshold
 MAX_ALLOWED_SPREAD_POINTS = 150  # Max spread in points for Gold (e.g., 150 points = $1.50)
 
 # Autonomous Loop Interval
-LOOP_INTERVAL_SECONDS = 600  # Increased to 10 minutes to reduce resource usage on t3.micro
+LOOP_INTERVAL_SECONDS = 5  # 5 seconds

@@ -19,14 +19,17 @@ from tools import (
     is_market_open,
     update_historical_outcomes,
     get_unified_market_data,
-    manage_existing_positions
+    manage_existing_positions,
+    get_current_spread
 )
 from diagnostics import run_startup_test
 import strategies
-from telemetry import TelemetryManager
+from telemetry import TelemetryManager # Added
 
 # Register shutdown alert
 atexit.register(lambda: send_telegram_alert("🛑 Trading Bot Stopped."))
+
+
 
 
 SYSTEM_INSTRUCTIONS = """
@@ -108,12 +111,24 @@ def ask_gatekeeper_with_retry(client, prompt: str, max_retries: int = 4) -> dict
 
 def run_trading_bot():
     """Main autonomous trading loop powered by Gemini."""
-    # Send startup notification
-    send_telegram_alert(f"🚀 Trading Bot Started on {config.DEFAULT_SYMBOL}")
+    # Fetch data for startup heartbeat
+    account_info = mt5.account_info()
+    equity = account_info.equity if account_info else 0.0
     
+    current_spread = get_current_spread(config.DEFAULT_SYMBOL)
+        
+    # Send startup notification
+    send_telegram_alert(
+        f"🚀 Trading Bot Started on {config.DEFAULT_SYMBOL}\n"
+        f"🟢 [STARTUP HEARTBEAT]\n"
+        f"Equity: ${equity:.2f}\n"
+        f"Scan Rate: 1 every 5 seconds.\n"
+        f"⏱️ Current Spread: {current_spread}"
+    )
+
     print(f"\n[AI AGENT ACTIVE] Model: {config.MODEL_NAME} | Symbol: {config.DEFAULT_SYMBOL}")
     print(f"Risk Rules: SL=2.0x ATR, TP=4.0x ATR, Daily Loss Limit=${config.MAX_DAILY_LOSS}")
-    print(f"Checking market every {config.LOOP_INTERVAL_SECONDS} seconds...\n")
+    print(f"Checking market every 5 seconds...\n")
 
     # Initialize heartbeat timer
     last_heartbeat_time = datetime.datetime.now()
@@ -128,7 +143,7 @@ def run_trading_bot():
             # 1. Pre-trade Safeguards
             if not check_spread_safe(symbol=config.DEFAULT_SYMBOL, max_allowed_spread_points=config.MAX_ALLOWED_SPREAD_POINTS):
                 telemetry.increment('spread_rejects')
-                time.sleep(config.LOOP_INTERVAL_SECONDS)
+                time.sleep(5)
                 continue
 
             # MANDATORY: Check for existing open positions
@@ -138,7 +153,7 @@ def run_trading_bot():
             # Fetch unified market data
             market_data = get_unified_market_data(config.DEFAULT_SYMBOL)
             if not market_data:
-                time.sleep(config.LOOP_INTERVAL_SECONDS)
+                time.sleep(5)
                 continue
 
             # --- HEARTBEAT CHECK ---
@@ -152,8 +167,9 @@ def run_trading_bot():
             if active_pos:
                 # Handle existing positions (Manage BE/Partial Close)
                 manage_existing_positions(active_pos[0], market_data['m5_atr'])
-                time.sleep(config.LOOP_INTERVAL_SECONDS)
+                time.sleep(5)
                 continue
+
             
             # 2. Trend & Signal Evaluation (Using RSI Crossover on completed bars)
             is_uptrend = market_data['m5_close'] > market_data['m5_ema50']
@@ -164,8 +180,9 @@ def run_trading_bot():
             
             rsi_buy_signal = (market_data['prev_m1_rsi'] < 30) and (market_data['curr_m1_rsi'] >= 30)
             rsi_sell_signal = (market_data['prev_m1_rsi'] > 70) and (market_data['curr_m1_rsi'] <= 70)
-
+            
             if rsi_buy_signal or rsi_sell_signal: telemetry.increment('rsi_touches')
+
 
             # 3. Order Execution with Dynamic Risk
             sl_points = int(market_data['m5_atr'] * 2.0)
@@ -191,8 +208,8 @@ def run_trading_bot():
             send_telegram_alert(f"🚨 BOT CRITICAL ERROR: {str(e)}")
             time.sleep(60)
 
-        # Loop Interval polling
-        time.sleep(config.LOOP_INTERVAL_SECONDS)
+        # 5-second polling
+        time.sleep(5)
         gc.collect()
 
 

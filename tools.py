@@ -29,12 +29,16 @@ def get_unified_market_data(symbol: str) -> dict:
     ema_m5 = indicators.calculate_ema(df_m5["close"], 50)
     atr_m5 = indicators.calculate_atr(df_m5, 14)
 
+    # Get current spread
+    spread = get_current_spread(symbol)
+
     return {
         "prev_m1_rsi": rsi_m1.iloc[-2],
         "curr_m1_rsi": rsi_m1.iloc[-1],
         "m5_ema50": ema_m5.iloc[-1],
         "m5_atr": atr_m5.iloc[-1],
-        "m5_close": df_m5["close"].iloc[-1]
+        "m5_close": df_m5["close"].iloc[-1],
+        "spread": spread
     }
 
 
@@ -215,7 +219,10 @@ def get_current_spread(symbol: str = config.DEFAULT_SYMBOL) -> int:
         return 9999 # Return a high number to effectively disable trading if data is missing
 
     # Spread in points = (ask - bid) / point
-    return int((tick.ask - tick.bid) / symbol_info.point)
+    spread_price = tick.ask - tick.bid
+    point_size = symbol_info.point
+    spread_points = int(spread_price / point_size) if point_size > 0 else symbol_info.spread
+    return spread_points
 
 def check_spread_safe(
     symbol: str = config.DEFAULT_SYMBOL,
